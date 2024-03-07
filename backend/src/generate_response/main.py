@@ -7,7 +7,8 @@ from langchain.memory import ConversationBufferMemory
 from langchain.embeddings import BedrockEmbeddings
 from langchain.vectorstores import FAISS
 from langchain.chains import ConversationalRetrievalChain
-
+from langchain.chains.question_answering import load_qa_chain
+from langchain.callbacks.streaming_stdout import StreamingStdOutCallbackHandler
 
 MEMORY_TABLE = os.environ["MEMORY_TABLE"]
 BUCKET = os.environ["BUCKET"]
@@ -39,13 +40,17 @@ def lambda_handler(event, context):
         client=bedrock_runtime,
         region_name="us-east-1",
     ), Bedrock(
-        model_id="anthropic.claude-v2", client=bedrock_runtime, region_name="us-east-1"
+        model_id="anthropic.claude-v2", client=bedrock_runtime, region_name="us-east-1", streaming=True,
+        callbacks=[StreamingStdOutCallbackHandler()]
     )
+
     faiss_index = FAISS.load_local("/tmp", embeddings)
+    doc_chain = load_qa_chain(llm, chain_type="map_reduce")
 
     message_history = DynamoDBChatMessageHistory(
         table_name=MEMORY_TABLE, session_id=conversation_id
     )
+
 
     memory = ConversationBufferMemory(
         memory_key="chat_history",
@@ -59,20 +64,49 @@ def lambda_handler(event, context):
         llm=llm,
         retriever=faiss_index.as_retriever(),
         memory=memory,
-        return_source_documents=True,
-    )
+        return_source_documents=True
+        )
 
-    res = qa({"question": human_input})
+    try:
+        res = qa({"question": human_input})
+        logger.info(f'response from llm: {res}')
 
-    logger.info(res)
-
-    return {
-        "statusCode": 200,
-        "headers": {
-            "Content-Type": "application/json",
-            "Access-Control-Allow-Headers": "*",
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "*",
-        },
-        "body": json.dumps(res["answer"]),
-    }
+  
+    except Exception as e:
+       logger.error(f'Exception: {e}')
+    finally:
+        buffer = b''
+        stopReason = None
+        wikiCommand = None
+        count=0
+        # while (stopReason is None):
+        for chunk in res:
+            # json_output = json.loads(chunk)
+            logger.info(f'chunk: {chunk}')
+            # streamData=json.loads(chunk.get('chunk').get('bytes').decode('utf-8'))
+            # stopReason=streamData.get('stop_reason')
+            # if (stopReason == 'stop' and count == 0):
+            #     logger.info("Sorry but I'm not sure about that. Could you please elaborate a little more?")
+            # buffer += streamData.get('generation').encode()
+            # if (streamData.get('generation') == '```'):
+            #     if (wikiCommand is None):
+            #         wikiCommand = 'start'
+            #     else:
+            #         wikiCommand = None
+            # if (streamData.get('generation') == '\n' and wikiCommand is None and len(buffer) != 0):
+            #     if (buffer.decode('utf-8') != '\n'):
+            #         say(buffer.decode('utf-8'))
+            #     buffer = b''
+            # if(stopReason == 'length'):
+            #     say("Sorry, but I ran out of credits to finish my answer...")
+            # count+=1
+        return {
+            "statusCode": 200,
+            "headers": {
+               "Content-Type": "application/json",
+               "Access-Control-Allow-Headers": "*",
+               "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "*",
+            },
+            "body": json.dumps(res["answer"]),
+        }
